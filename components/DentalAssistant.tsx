@@ -172,14 +172,7 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
         try {
             // Initialize AI client just-in-time
             if (!ai.current) {
-                const apiKey = process.env.API_KEY;
-                if (!apiKey) {
-                    console.error("API key is missing. Please set the API_KEY environment variable.");
-                    setErrorMessage("API Key is not configured. Please set it up in your environment settings.");
-                    setStatus('ERROR');
-                    return;
-                }
-                ai.current = new GoogleGenAI({ apiKey });
+                ai.current = new GoogleGenAI({ apiKey: process.env.API_KEY });
             }
             setErrorMessage(null); // Clear previous errors
 
