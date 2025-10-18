@@ -5,8 +5,6 @@ import type { Transcript } from '../types';
 import { MicrophoneIcon, StopIcon, UserIcon, AssistantIcon, BackIcon } from './icons';
 
 // --- Gemini Configuration ---
-const API_KEY = process.env.API_KEY as string;
-
 const DENTAL_ASSISTANT_SYSTEM_INSTRUCTION = `You are a friendly, professional, and knowledgeable dental assistant for 'BrightSmile Dental Clinic'. Your role is to assist patients by answering their questions clearly and concisely. You can help with scheduling, explaining procedures, providing oral hygiene tips, discussing post-treatment care, and answering questions about insurance and billing. Always maintain a polite, empathetic, and helpful tone. Keep your responses easy to understand for patients of all ages. Do not provide medical advice, and for any medical concerns, advise the user to consult with a dentist.`;
 
 const tools: FunctionDeclaration[] = [
@@ -62,10 +60,10 @@ function createBlob(data: Float32Array): Blob {
 export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
     const [status, setStatus] = useState<Status>('IDLE');
     const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     
     const ai = useRef<GoogleGenAI | null>(null);
     const sessionRef = useRef<LiveSession | null>(null);
-    // Fix: Add a ref to hold the session promise to avoid race conditions.
     const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
     const inputAudioContextRef = useRef<AudioContext | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
@@ -77,9 +75,8 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
     const assistantTranscriptRef = useRef<{ id: number, text: string } | null>(null);
 
     useEffect(() => {
-        ai.current = new GoogleGenAI({ apiKey: API_KEY });
+        // Cleanup on unmount
         return () => {
-             // Cleanup on unmount
             disconnect();
         };
     }, []);
@@ -88,19 +85,20 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
         const transcriptRef = speaker === 'user' ? userTranscriptRef : assistantTranscriptRef;
         
         setTranscripts(prev => {
-            if (transcriptRef.current) {
-                // Update existing transcript entry
-                const existing = prev.find(t => t.id === transcriptRef.current!.id);
+            const transcriptId = transcriptRef.current?.id;
+            if (transcriptId) {
+                const existing = prev.find(t => t.id === transcriptId);
                 if (existing) {
                     existing.text = transcriptRef.current!.text + text;
                     existing.isFinal = isFinal;
                     return [...prev];
                 }
             }
-            // Add new transcript entry
+            
             const newId = Date.now();
-            transcriptRef.current = { id: newId, text };
-            return [...prev, { id: newId, speaker, text, isFinal }];
+            const newText = transcriptRef.current ? transcriptRef.current.text + text : text;
+            transcriptRef.current = { id: newId, text: newText };
+            return [...prev, { id: newId, speaker, text: newText, isFinal }];
         });
 
         if (isFinal) {
@@ -155,7 +153,6 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
                 result = `Checking availability for ${args.date}... The best time is 3 PM.`;
             }
 
-            // Fix: Use session promise to send tool response to avoid race conditions.
             sessionPromiseRef.current?.then((session) => {
                 session.sendToolResponse({
                     functionResponses: {
@@ -171,12 +168,24 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
     const connect = async () => {
         if (sessionRef.current) return;
         setStatus('PROCESSING');
+
         try {
+            // Initialize AI client just-in-time
+            if (!ai.current) {
+                const apiKey = process.env.API_KEY;
+                if (!apiKey) {
+                    console.error("API key is missing. Please set the API_KEY environment variable.");
+                    setErrorMessage("API Key is not configured. Please set it up in your environment settings.");
+                    setStatus('ERROR');
+                    return;
+                }
+                ai.current = new GoogleGenAI({ apiKey });
+            }
+            setErrorMessage(null); // Clear previous errors
+
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-            // Fix: Cast window to `any` to support vendor-prefixed `webkitAudioContext`
             inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-            // Fix: Cast window to `any` to support vendor-prefixed `webkitAudioContext`
             outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
 
             const sessionPromise = ai.current!.live.connect({
@@ -189,7 +198,6 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
                         
                         scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
                             const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-                            // Fix: Use createBlob helper and send data via session promise.
                             const pcmBlob = createBlob(inputData);
                             sessionPromise.then((session) => {
                                 session.sendRealtimeInput({ media: pcmBlob });
@@ -202,6 +210,7 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
                     onmessage: handleServerMessage,
                     onerror: (e) => {
                         console.error('Session error:', e);
+                        setErrorMessage('A session error occurred.');
                         setStatus('ERROR');
                         disconnect();
                     },
@@ -222,6 +231,11 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
             sessionRef.current = await sessionPromise;
         } catch (error) {
             console.error('Failed to connect:', error);
+            if (error instanceof Error) {
+                setErrorMessage(error.message);
+            } else {
+                setErrorMessage("An unknown error occurred during connection.");
+            }
             setStatus('ERROR');
         }
     };
@@ -236,8 +250,8 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
         mediaStreamSourceRef.current?.disconnect();
         mediaStreamSourceRef.current = null;
 
-        inputAudioContextRef.current?.close();
-        outputAudioContextRef.current?.close();
+        inputAudioContextRef.current?.close().catch(console.error);
+        outputAudioContextRef.current?.close().catch(console.error);
         inputAudioContextRef.current = null;
         outputAudioContextRef.current = null;
 
@@ -260,7 +274,7 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
             case 'LISTENING': return 'Listening... Tap to disconnect.';
             case 'PROCESSING': return 'Connecting...';
             case 'SPEAKING': return 'Assistant is speaking...';
-            case 'ERROR': return 'An error occurred. Tap to retry.';
+            case 'ERROR': return errorMessage || 'An error occurred. Tap to retry.';
             case 'IDLE': return 'Tap the mic to start';
         }
     };
