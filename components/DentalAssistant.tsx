@@ -44,7 +44,14 @@ const tools = [
 
 // --- Component Types ---
 type Status = 'IDLE' | 'RECORDING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
-type Message = { role: 'user' | 'assistant' | 'system' | 'tool'; content: string; tool_calls?: any; tool_call_id?: string; };
+// Updated Message type to be more compliant with OpenAI's API
+type Message = { 
+    role: 'user' | 'assistant' | 'system' | 'tool'; 
+    content: string | null; 
+    name?: string;
+    tool_calls?: any; 
+    tool_call_id?: string; 
+};
 
 interface DentalAssistantProps {
     onGoBack: () => void;
@@ -107,7 +114,7 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
                 headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
                 body: formData,
             });
-            if (!sttResponse.ok) throw new Error('STT API call failed');
+            if (!sttResponse.ok) throw new Error(`STT API call failed: ${sttResponse.statusText}`);
             const sttData = await sttResponse.json();
             const userText = sttData.text;
 
@@ -130,79 +137,89 @@ export default function DentalAssistant({ onGoBack }: DentalAssistantProps) {
     };
     
     const getChatCompletion = async (currentMessages: Message[]) => {
-        const chatResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: 'gpt-4o',
-                messages: currentMessages,
-                tools: tools,
-                tool_choice: 'auto',
-            }),
-        });
-        if (!chatResponse.ok) throw new Error('Chat API call failed');
-        const chatData = await chatResponse.json();
-        const assistantMessage = chatData.choices[0].message;
-
-        const toolCalls = assistantMessage.tool_calls;
-        if (toolCalls) {
-            // Handle function call
-            const toolCall = toolCalls[0]; // Assuming one tool call for simplicity
-            const functionName = toolCall.function.name;
-            const functionArgs = JSON.parse(toolCall.function.arguments);
-            let functionResult = '';
-
-            if (functionName === 'scheduleAppointment') {
-                const { patientName, date, time, procedure } = functionArgs;
-                const confirmationMessage = `Please confirm this appointment:\n\nPatient: ${patientName}\nDate: ${date}\nTime: ${time}\nProcedure: ${procedure}`;
-                if (window.confirm(confirmationMessage)) {
-                    functionResult = `Appointment confirmed for ${patientName} on ${date} at ${time}.`;
-                } else {
-                    functionResult = `The user cancelled the appointment scheduling.`;
-                }
-            } else if (functionName === 'getAppointmentAvailability') {
-                functionResult = `Checking availability for ${functionArgs.date}... The best time is 3 PM.`;
-            }
-            
-            const nextMessages: Message[] = [
-                ...currentMessages,
-                assistantMessage,
-                {
-                    tool_call_id: toolCall.id,
-                    role: 'tool',
-                    content: functionResult,
-                }
-            ];
-            setMessages(nextMessages);
-            await getChatCompletion(nextMessages); // Call again with the tool result
-        } else {
-            // Handle text response
-            const assistantText = assistantMessage.content;
-            setMessages(prev => [...prev, { role: 'assistant', content: assistantText }]);
-            updateTranscript('assistant', assistantText);
-
-            // 3. Text-to-Speech
-            setStatus('SPEAKING');
-            const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+        try {
+            const chatResponse = await fetch('https://api.openai.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: 'tts-1', input: assistantText, voice: 'nova' }),
+                body: JSON.stringify({
+                    model: 'gpt-4o',
+                    messages: currentMessages,
+                    tools: tools,
+                    tool_choice: 'auto',
+                }),
             });
-            if (!ttsResponse.ok) throw new Error('TTS API call failed');
-            const audioBlob = await ttsResponse.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
-            const audio = new Audio(audioUrl);
-            audio.play();
-            audio.onended = () => {
-                setStatus('IDLE');
-            };
+            if (!chatResponse.ok) throw new Error(`Chat API call failed: ${chatResponse.statusText}`);
+            const chatData = await chatResponse.json();
+            const assistantMessage = chatData.choices[0].message;
+
+            const toolCalls = assistantMessage.tool_calls;
+            if (toolCalls) {
+                // Handle function call
+                const toolCall = toolCalls[0]; // Assuming one tool call for simplicity
+                const functionName = toolCall.function.name;
+                const functionArgs = JSON.parse(toolCall.function.arguments);
+                let functionResult = '';
+
+                if (functionName === 'scheduleAppointment') {
+                    const { patientName, date, time, procedure } = functionArgs;
+                    const confirmationMessage = `Please confirm this appointment:\n\nPatient: ${patientName}\nDate: ${date}\nTime: ${time}\nProcedure: ${procedure}`;
+                    if (window.confirm(confirmationMessage)) {
+                        functionResult = `Appointment confirmed for ${patientName} on ${date} at ${time}.`;
+                    } else {
+                        functionResult = `The user cancelled the appointment scheduling.`;
+                    }
+                } else if (functionName === 'getAppointmentAvailability') {
+                    functionResult = `Checking availability for ${functionArgs.date}... The best time is 3 PM.`;
+                }
+                
+                const nextMessages: Message[] = [
+                    ...currentMessages,
+                    assistantMessage,
+                    {
+                        tool_call_id: toolCall.id,
+                        role: 'tool',
+                        // FIX: Added the 'name' property, which is required by the OpenAI API
+                        name: functionName,
+                        content: functionResult,
+                    }
+                ];
+                setMessages(nextMessages);
+                await getChatCompletion(nextMessages); // Call again with the tool result
+            } else {
+                // Handle text response
+                const assistantText = assistantMessage.content;
+                if (!assistantText) {
+                    throw new Error("Received empty response from assistant.");
+                }
+                setMessages(prev => [...prev, { role: 'assistant', content: assistantText }]);
+                updateTranscript('assistant', assistantText);
+
+                // 3. Text-to-Speech
+                setStatus('SPEAKING');
+                const ttsResponse = await fetch('https://api.openai.com/v1/audio/speech', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: 'tts-1', input: assistantText, voice: 'nova' }),
+                });
+                if (!ttsResponse.ok) throw new Error(`TTS API call failed: ${ttsResponse.statusText}`);
+                const audioBlob = await ttsResponse.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.play();
+                audio.onended = () => {
+                    setStatus('IDLE');
+                };
+            }
+        } catch (error) {
+            console.error("Error in getChatCompletion:", error);
+            setStatus('ERROR');
         }
     };
 
     const handleMicClick = () => {
         if (status === 'RECORDING') {
             stopRecording();
-        } else {
+        } else if (status === 'IDLE' || status === 'ERROR') {
             startRecording();
         }
     };
