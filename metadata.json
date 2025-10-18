@@ -1,0 +1,7 @@
+{
+  "name": "Dental AI Voice Assistant",
+  "description": "A conversational AI voice assistant for a dental clinic that answers patient questions about all aspects of their care, from appointments and procedures to oral hygiene and billing.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
